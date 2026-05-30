@@ -1,18 +1,24 @@
 #!/usr/bin/env zsh
 set -u
 
+export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+
 CODEX_HOME="${CODEX_HOME:-$HOME/.codex}"
 STATE_DB="${CODEX_STATE_DB:-$CODEX_HOME/state_5.sqlite}"
 LOGS_DB="${CODEX_LOGS_DB:-$CODEX_HOME/logs_2.sqlite}"
 
 echo "1) 测试系统通知..."
-osascript <<'APPLESCRIPT' >/dev/null 2>&1
-display notification "如果你看到这条，说明通知权限正常。" with title "Codex 提醒测试"
-APPLESCRIPT
-if [[ $? -eq 0 ]]; then
+if command -v terminal-notifier >/dev/null 2>&1; then
+  terminal-notifier -title "Codex 提醒测试" -message "如果你看到这条，说明通知权限正常。" -sound default >/dev/null 2>&1
+  notify_exit=$?
+else
+  osascript -e 'display notification "如果你看到这条，说明通知权限正常。" with title "Codex 提醒测试"' >/dev/null 2>&1
+  notify_exit=$?
+fi
+if [[ $notify_exit -eq 0 ]]; then
   echo "   OK: 通知命令已发送。"
 else
-  echo "   FAIL: 通知命令发送失败。请检查 系统设置 > 通知。"
+  echo "   FAIL: 通知命令发送失败。建议安装 terminal-notifier：brew install terminal-notifier"
 fi
 
 echo

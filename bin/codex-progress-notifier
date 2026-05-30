@@ -1,6 +1,8 @@
 #!/usr/bin/env zsh
 set -euo pipefail
 
+export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+
 APP_NAME="${CODEX_APP_NAME:-Codex}"
 POLL_SECONDS="${CODEX_NOTIFY_POLL_SECONDS:-2}"
 CODEX_HOME="${CODEX_HOME:-$HOME/.codex}"
