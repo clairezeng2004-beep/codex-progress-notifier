@@ -1,0 +1,62 @@
+#!/usr/bin/env zsh
+set -u
+
+CODEX_HOME="${CODEX_HOME:-$HOME/.codex}"
+STATE_DB="${CODEX_STATE_DB:-$CODEX_HOME/state_5.sqlite}"
+LOGS_DB="${CODEX_LOGS_DB:-$CODEX_HOME/logs_2.sqlite}"
+
+echo "1) 测试系统通知..."
+osascript <<'APPLESCRIPT' >/dev/null 2>&1
+display notification "如果你看到这条，说明通知权限正常。" with title "Codex 提醒测试"
+APPLESCRIPT
+if [[ $? -eq 0 ]]; then
+  echo "   OK: 通知命令已发送。"
+else
+  echo "   FAIL: 通知命令发送失败。请检查 系统设置 > 通知。"
+fi
+
+echo
+echo "2) 测试辅助功能读取前台应用..."
+front_app="$(osascript <<'APPLESCRIPT' 2>/dev/null
+tell application "System Events"
+  get name of first application process whose frontmost is true
+end tell
+APPLESCRIPT
+)"
+if [[ -n "$front_app" ]]; then
+  echo "   OK: 已读取到当前最前面的应用：$front_app"
+else
+  echo "   WARN: 还不能读取前台应用。提醒仍可用，但无法在你回到 Codex 时自动清除通知。"
+fi
+
+echo
+echo "3) 测试 Codex 本地会话数据库..."
+if [[ ! -f "$STATE_DB" ]]; then
+  echo "   FAIL: 找不到 $STATE_DB"
+else
+  row="$(sqlite3 -readonly "$STATE_DB" "select id || char(31) || replace(replace(coalesce(nullif(title,''),'Codex 对话'), char(10), ' '), char(13), ' ') || char(31) || coalesce(updated_at_ms, updated_at * 1000, 0) from threads where archived = 0 order by coalesce(updated_at_ms, updated_at * 1000, 0) desc limit 1;" 2>/dev/null || true)"
+  if [[ -n "$row" ]]; then
+    title="$(printf '%s' "$row" | awk -F $'\037' '{print $2}' | tr '\n\t' '  ')"
+    updated="$(printf '%s' "$row" | awk -F $'\037' '{print $3}')"
+    echo "   OK: 已读到最近的 Codex 对话。"
+    echo "   标题：${title:-Codex 对话}"
+    echo "   更新时间：${updated:-unknown}"
+  else
+    echo "   FAIL: 数据库存在，但没有读到会话记录。"
+  fi
+fi
+
+echo
+echo "4) 测试最近是否有授权请求记录..."
+if [[ ! -f "$LOGS_DB" ]]; then
+  echo "   WARN: 找不到 $LOGS_DB"
+else
+  count="$(sqlite3 -readonly "$LOGS_DB" "select count(*) from logs where ts >= strftime('%s','now') - 600 and (feedback_log_body like '%APPROVAL REQUEST START%' or feedback_log_body like '%request_permissions%' or feedback_log_body like '%sandbox_permissions%');" 2>/dev/null || true)"
+  echo "   最近 10 分钟疑似授权请求数量：${count:-0}"
+fi
+
+echo
+echo "5) 后台工具日志位置："
+echo "   $HOME/Library/Application Support/CodexProgressNotifier/notifier.log"
+echo
+echo "现在的检测方式已经改成读取 Codex 本地会话数据库，不再依赖窗口文字长度。"
