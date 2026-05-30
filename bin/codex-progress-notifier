@@ -1,0 +1,141 @@
+#!/usr/bin/env zsh
+set -euo pipefail
+
+APP_NAME="${CODEX_APP_NAME:-Codex}"
+POLL_SECONDS="${CODEX_NOTIFY_POLL_SECONDS:-2}"
+STATE_DIR="${HOME}/Library/Application Support/CodexProgressNotifier"
+STATE_FILE="${STATE_DIR}/state"
+LOG_FILE="${STATE_DIR}/notifier.log"
+NOTIFICATION_GROUP="codex-progress"
+
+mkdir -p "$STATE_DIR"
+touch "$STATE_FILE" "$LOG_FILE"
+
+log() {
+  printf '%s %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*" >> "$LOG_FILE"
+}
+
+escape_applescript() {
+  printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'
+}
+
+activate_codex() {
+  osascript -e "tell application \"${APP_NAME}\" to activate" >/dev/null 2>&1 || true
+}
+
+remove_notification() {
+  if command -v terminal-notifier >/dev/null 2>&1; then
+    terminal-notifier -remove "$NOTIFICATION_GROUP" >/dev/null 2>&1 || true
+  fi
+}
+
+notify() {
+  local title="$1"
+  local message="$2"
+
+  if command -v terminal-notifier >/dev/null 2>&1; then
+    terminal-notifier \
+      -title "$title" \
+      -message "$message" \
+      -group "$NOTIFICATION_GROUP" \
+      -activate "$APP_NAME" \
+      -sound default >/dev/null 2>&1 || true
+  else
+    local safe_title safe_message
+    safe_title="$(escape_applescript "$title")"
+    safe_message="$(escape_applescript "$message")"
+    osascript -e "display notification \"${safe_message}\" with title \"${safe_title}\" sound name \"Glass\"" >/dev/null 2>&1 || true
+  fi
+}
+
+snapshot() {
+  osascript <<'APPLESCRIPT' 2>/dev/null || true
+set appName to "Codex"
+
+tell application "System Events"
+  set frontApp to ""
+  try
+    set frontApp to name of first application process whose frontmost is true
+  end try
+
+  set codexRunning to false
+  set codexText to ""
+  try
+    set codexProc to first application process whose name is appName
+    set codexRunning to true
+    repeat with w in windows of codexProc
+      try
+        set codexText to codexText & " " & (value of static texts of w as text)
+      end try
+      try
+        set codexText to codexText & " " & (name of buttons of w as text)
+      end try
+      try
+        set codexText to codexText & " " & (description of UI elements of w as text)
+      end try
+    end repeat
+  end try
+end tell
+
+set codexText to my normalize(codexText)
+set statusKind to "idle"
+set summary to ""
+
+if codexRunning is false then
+  set statusKind to "not_running"
+  set summary to "Codex 没有运行。"
+else if codexText contains "Allow" or codexText contains "Authorize" or codexText contains "Approval" or codexText contains "permission" or codexText contains "grant" or codexText contains "授权" or codexText contains "允许" or codexText contains "批准" then
+  set statusKind to "needs_auth"
+  set summary to "Codex 正在等待你的授权或确认。"
+else if codexText contains "completed" or codexText contains "done" or codexText contains "finished" or codexText contains "Final answer" or codexText contains "任务完成" or codexText contains "完成" then
+  set statusKind to "completed"
+  set summary to "Codex 可能已经完成任务，等待你查看结果。"
+else if codexText contains "running" or codexText contains "working" or codexText contains "thinking" or codexText contains "正在" then
+  set statusKind to "working"
+  set summary to "Codex 仍在处理当前任务。"
+else
+  set statusKind to "idle"
+  set summary to "Codex 当前没有明显的待办状态。"
+end if
+
+return frontApp & linefeed & statusKind & linefeed & summary
+
+on normalize(t)
+  set AppleScript's text item delimiters to {return, linefeed, tab}
+  set parts to text items of (t as text)
+  set AppleScript's text item delimiters to " "
+  set t to parts as text
+  set AppleScript's text item delimiters to ""
+  return t
+end normalize
+APPLESCRIPT
+}
+
+log "started"
+
+while true; do
+  raw="$(snapshot)"
+  front_app="$(printf '%s\n' "$raw" | sed -n '1p')"
+  status_kind="$(printf '%s\n' "$raw" | sed -n '2p')"
+  summary="$(printf '%s\n' "$raw" | sed -n '3,$p' | tr '\n' ' ' | sed 's/[[:space:]][[:space:]]*/ /g')"
+
+  last_state="$(cat "$STATE_FILE" 2>/dev/null || true)"
+  current_state="${front_app}|${status_kind}|${summary}"
+
+  if [[ "$front_app" == "$APP_NAME" ]]; then
+    remove_notification
+  elif [[ "$status_kind" == "needs_auth" || "$status_kind" == "completed" ]]; then
+    if [[ "$current_state" != "$last_state" ]]; then
+      case "$status_kind" in
+        needs_auth) notify "Codex 需要你操作" "$summary 点击通知可回到 Codex。" ;;
+        completed) notify "Codex 任务有新进展" "$summary 点击通知可回到 Codex。" ;;
+      esac
+      printf '%s' "$current_state" > "$STATE_FILE"
+      log "notified ${status_kind}: ${summary}"
+    fi
+  else
+    printf '%s' "$current_state" > "$STATE_FILE"
+  fi
+
+  sleep "$POLL_SECONDS"
+done
