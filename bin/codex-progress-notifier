@@ -5,16 +5,21 @@ export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 
 APP_NAME="${CODEX_APP_NAME:-Codex}"
 POLL_SECONDS="${CODEX_NOTIFY_POLL_SECONDS:-2}"
+COMPLETION_QUIET_SECONDS="${CODEX_NOTIFY_COMPLETION_QUIET_SECONDS:-18}"
 CODEX_HOME="${CODEX_HOME:-$HOME/.codex}"
 STATE_DB="${CODEX_STATE_DB:-$CODEX_HOME/state_5.sqlite}"
 LOGS_DB="${CODEX_LOGS_DB:-$CODEX_HOME/logs_2.sqlite}"
 STATE_DIR="${HOME}/Library/Application Support/CodexProgressNotifier"
 STATE_FILE="${STATE_DIR}/state"
+READ_FILE="${STATE_DIR}/read"
+NOTIFIED_FILE="${STATE_DIR}/notified"
 LOG_FILE="${STATE_DIR}/notifier.log"
 NOTIFICATION_GROUP="codex-progress"
+ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+ICON_FILE="${CODEX_NOTIFY_ICON:-$ROOT_DIR/assets/codex-notification.png}"
 
 mkdir -p "$STATE_DIR"
-touch "$STATE_FILE" "$LOG_FILE"
+touch "$STATE_FILE" "$READ_FILE" "$NOTIFIED_FILE" "$LOG_FILE"
 
 log() {
   printf '%s %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*" >> "$LOG_FILE"
@@ -47,7 +52,8 @@ notify() {
       -title "$title" \
       -message "$message" \
       -group "$NOTIFICATION_GROUP" \
-      -activate "$APP_NAME" \
+      -appIcon "$ICON_FILE" \
+      -execute "open -a ${APP_NAME}" \
       -sound default >/dev/null 2>&1 || true
   else
     local safe_title safe_message
@@ -68,26 +74,37 @@ latest_thread_snapshot() {
     2>/dev/null || true
 }
 
-has_recent_approval_request() {
+latest_approval_id() {
+  local thread_id="$1"
   if [[ ! -f "$LOGS_DB" ]]; then
-    return 1
+    return
   fi
 
-  local count
-  count="$(sqlite3 -readonly "$LOGS_DB" \
-    "select count(*) from logs where ts >= strftime('%s','now') - 600 and (feedback_log_body like '%APPROVAL REQUEST START%' or feedback_log_body like '%request_permissions%' or feedback_log_body like '%sandbox_permissions%');" \
-    2>/dev/null || true)"
-  [[ "${count:-0}" != "0" ]]
+  sqlite3 -readonly "$LOGS_DB" \
+    "select coalesce(max(id),'') from logs where thread_id = '$thread_id' and ts >= strftime('%s','now') - 900 and feedback_log_body like '%APPROVAL REQUEST START%';" \
+    2>/dev/null || true
 }
 
-trim() {
-  local value="$1"
-  value="$(printf '%s' "$value" | tr '\n\t' '  ' | sed 's/[[:space:]][[:space:]]*/ /g; s/^ //; s/ $//')"
-  if (( ${#value} > 90 )); then
-    printf '%s...' "${value:0:90}"
-  else
-    printf '%s' "$value"
+latest_assistant_message_id() {
+  local thread_id="$1"
+  if [[ ! -f "$LOGS_DB" ]]; then
+    return
   fi
+
+  sqlite3 -readonly "$LOGS_DB" \
+    "select coalesce(max(id),'') from logs where thread_id = '$thread_id' and ts >= strftime('%s','now') - 300 and feedback_log_body like '%op.dispatch.assistant_message%';" \
+    2>/dev/null || true
+}
+
+trim_chars() {
+  local limit="$1"
+  local value="$2"
+  value="$(printf '%s' "$value" | tr '\n\t' '  ' | sed 's/[[:space:]][[:space:]]*/ /g; s/^ //; s/ $//')"
+  LIMIT="$limit" perl -CS -Mutf8 -ne 'chomp; $limit=$ENV{LIMIT}; print length($_) > $limit ? substr($_, 0, $limit) . "..." : $_' <<< "$value"
+}
+
+now_ms() {
+  printf '%s000' "$(date +%s)"
 }
 
 log "started database mode"
@@ -105,19 +122,36 @@ while true; do
   updated_at_ms="$(printf '%s' "$raw" | awk -F $'\037' '{print $3}')"
   preview="$(printf '%s' "$raw" | awk -F $'\037' '{print $4}')"
 
-  summary="$(trim "${thread_title:-Codex 对话}")"
-  [[ -n "${preview:-}" ]] && summary="${summary} - $(trim "$preview")"
+  summary="$(trim_chars 34 "${thread_title:-Codex 对话}")"
+  preview_summary="$(trim_chars 20 "${preview:-}")"
+  if [[ -n "$preview_summary" && "$preview_summary" != "$summary" ]]; then
+    summary="${summary} - ${preview_summary}"
+  fi
 
-  last_state="$(cat "$STATE_FILE" 2>/dev/null || true)"
+  read_state="$(cat "$READ_FILE" 2>/dev/null || true)"
+  last_notified="$(cat "$NOTIFIED_FILE" 2>/dev/null || true)"
   current_state="${thread_id}|${updated_at_ms}"
 
-  if [[ "$front" != "$APP_NAME" && -n "$thread_id" && "$thread_id" != "missing_db" && "$current_state" != "$last_state" ]]; then
-    if has_recent_approval_request; then
-      notify "Codex 需要你操作" "$summary"
+  if [[ "$front" == "$APP_NAME" && -n "$thread_id" && "$thread_id" != "missing_db" ]]; then
+    printf '%s' "$current_state" > "$READ_FILE"
+    read_state="$current_state"
+  fi
+
+  if [[ "$front" != "$APP_NAME" && -n "$thread_id" && "$thread_id" != "missing_db" && "$current_state" != "$read_state" ]]; then
+    approval_id="$(latest_approval_id "$thread_id")"
+    if [[ -n "$approval_id" && "${thread_id}|approval|${approval_id}" != "$last_notified" ]]; then
+      notify "Codex 需要授权" "$summary"
       log "notified approval: ${summary}"
+      printf '%s' "${thread_id}|approval|${approval_id}" > "$NOTIFIED_FILE"
     else
-      notify "Codex 有新进展" "$summary"
-      log "notified update: ${summary}"
+      assistant_id="$(latest_assistant_message_id "$thread_id")"
+      quiet_ms=$(( COMPLETION_QUIET_SECONDS * 1000 ))
+      age_ms=$(( $(now_ms) - ${updated_at_ms:-0} ))
+      if [[ -n "$assistant_id" && "$age_ms" -ge "$quiet_ms" && "${thread_id}|complete|${updated_at_ms}" != "$last_notified" ]]; then
+        notify "Codex 任务完成" "$summary"
+        log "notified completion: ${summary}"
+        printf '%s' "${thread_id}|complete|${updated_at_ms}" > "$NOTIFIED_FILE"
+      fi
     fi
   fi
 
