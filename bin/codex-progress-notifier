@@ -6,6 +6,7 @@ export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 APP_NAME="${CODEX_APP_NAME:-Codex}"
 POLL_SECONDS="${CODEX_NOTIFY_POLL_SECONDS:-2}"
 COMPLETION_QUIET_SECONDS="${CODEX_NOTIFY_COMPLETION_QUIET_SECONDS:-18}"
+SUPPRESS_WHEN_CODEX_VISIBLE="${CODEX_NOTIFY_SUPPRESS_WHEN_VISIBLE:-1}"
 CODEX_HOME="${CODEX_HOME:-$HOME/.codex}"
 STATE_DB="${CODEX_STATE_DB:-$CODEX_HOME/state_5.sqlite}"
 LOGS_DB="${CODEX_LOGS_DB:-$CODEX_HOME/logs_2.sqlite}"
@@ -34,6 +35,37 @@ front_app() {
 tell application "System Events"
   get name of first application process whose frontmost is true
 end tell
+APPLESCRIPT
+}
+
+codex_visible() {
+  osascript <<'APPLESCRIPT' 2>/dev/null || true
+set appName to "Codex"
+tell application "System Events"
+  set visibleCount to 0
+  try
+    set codexProc to first application process whose name is appName
+    repeat with w in windows of codexProc
+      set isVisible to false
+      set isMinimized to false
+      try
+        set isVisible to visible of w
+      end try
+      try
+        set isMinimized to value of attribute "AXMinimized" of w
+      end try
+      if isVisible is true and isMinimized is false then
+        set visibleCount to visibleCount + 1
+      end if
+    end repeat
+  end try
+end tell
+
+if visibleCount > 0 then
+  return "yes"
+else
+  return "no"
+end if
 APPLESCRIPT
 }
 
@@ -111,8 +143,13 @@ log "started database mode"
 
 while true; do
   front="$(front_app)"
+  visible="$(codex_visible)"
+  codex_is_seen="0"
+  if [[ "$front" == "$APP_NAME" || ("$SUPPRESS_WHEN_CODEX_VISIBLE" == "1" && "$visible" == "yes") ]]; then
+    codex_is_seen="1"
+  fi
 
-  if [[ "$front" == "$APP_NAME" ]]; then
+  if [[ "$codex_is_seen" == "1" ]]; then
     remove_notification
   fi
 
@@ -132,12 +169,12 @@ while true; do
   last_notified="$(cat "$NOTIFIED_FILE" 2>/dev/null || true)"
   current_state="${thread_id}|${updated_at_ms}"
 
-  if [[ "$front" == "$APP_NAME" && -n "$thread_id" && "$thread_id" != "missing_db" ]]; then
+  if [[ "$codex_is_seen" == "1" && -n "$thread_id" && "$thread_id" != "missing_db" ]]; then
     printf '%s' "$current_state" > "$READ_FILE"
     read_state="$current_state"
   fi
 
-  if [[ "$front" != "$APP_NAME" && -n "$thread_id" && "$thread_id" != "missing_db" && "$current_state" != "$read_state" ]]; then
+  if [[ "$codex_is_seen" != "1" && -n "$thread_id" && "$thread_id" != "missing_db" && "$current_state" != "$read_state" ]]; then
     approval_id="$(latest_approval_id "$thread_id")"
     if [[ -n "$approval_id" && "${thread_id}|approval|${approval_id}" != "$last_notified" ]]; then
       notify "Codex 需要授权" "$summary"
