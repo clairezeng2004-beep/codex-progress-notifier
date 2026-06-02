@@ -7,6 +7,7 @@ APP_NAME="${CODEX_APP_NAME:-Codex}"
 POLL_SECONDS="${CODEX_NOTIFY_POLL_SECONDS:-2}"
 COMPLETION_QUIET_SECONDS="${CODEX_NOTIFY_COMPLETION_QUIET_SECONDS:-18}"
 SUPPRESS_WHEN_CODEX_VISIBLE="${CODEX_NOTIFY_SUPPRESS_WHEN_VISIBLE:-1}"
+APPROVAL_NOTIFICATIONS="${CODEX_NOTIFY_APPROVALS:-0}"
 CODEX_HOME="${CODEX_HOME:-$HOME/.codex}"
 STATE_DB="${CODEX_STATE_DB:-$CODEX_HOME/state_5.sqlite}"
 LOGS_DB="${CODEX_LOGS_DB:-$CODEX_HOME/logs_2.sqlite}"
@@ -113,12 +114,15 @@ latest_thread_snapshot() {
 
 latest_approval_id() {
   local thread_id="$1"
+  if [[ "$APPROVAL_NOTIFICATIONS" != "1" ]]; then
+    return
+  fi
   if [[ ! -f "$LOGS_DB" ]]; then
     return
   fi
 
   sqlite3 -readonly "$LOGS_DB" \
-    "select coalesce(max(id),'') from logs where thread_id = '$thread_id' and ts >= strftime('%s','now') - 900 and feedback_log_body like '%APPROVAL REQUEST START%';" \
+    "select coalesce(max(id),'') from logs where thread_id = '$thread_id' and ts >= strftime('%s','now') - 120 and target = 'codex_api::endpoint::responses_websocket' and feedback_log_body like '%request_permissions call%' and feedback_log_body not like '%approval assessment%' and feedback_log_body not like '%TRANSCRIPT%';" \
     2>/dev/null || true
 }
 
