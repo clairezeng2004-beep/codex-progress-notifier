@@ -17,7 +17,12 @@ NOTIFIED_FILE="${STATE_DIR}/notified"
 LOG_FILE="${STATE_DIR}/notifier.log"
 NOTIFICATION_GROUP="codex-progress"
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
-ICON_FILE="${CODEX_NOTIFY_ICON:-$ROOT_DIR/assets/codex-notification.png}"
+DEFAULT_ICON_FILE="/Applications/Codex.app/Contents/Resources/icon.icns"
+if [[ -f "$DEFAULT_ICON_FILE" ]]; then
+  ICON_FILE="${CODEX_NOTIFY_ICON:-$DEFAULT_ICON_FILE}"
+else
+  ICON_FILE="${CODEX_NOTIFY_ICON:-$ROOT_DIR/assets/codex-notification.png}"
+fi
 
 mkdir -p "$STATE_DIR"
 touch "$STATE_FILE" "$READ_FILE" "$NOTIFIED_FILE" "$LOG_FILE"
